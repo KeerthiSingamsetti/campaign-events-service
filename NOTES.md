@@ -81,3 +81,84 @@ After "validate first, then dedup, first write wins", the seed yields exactly: *
 - Why not in-memory: it is simpler and has no dependency, but it fails the "provider retried, service restarted, did we keep the number?" test, and every scale step (durable queue, replicas, reconciliation) starts from persistence.
 - Why `modernc.org/sqlite`: it is pure Go, so `go run .` works with no C toolchain, which matters for the reviewer's machine. `mattn/go-sqlite3` needs cgo.
 - Concurrency: one `*sql.DB`, `MaxOpenConns(1)`, WAL mode, `busy_timeout=5000`. A single writer connection serialises writes (SQLite has one writer anyway), removes `SQLITE_BUSY` retry logic, and at thousands of events/day the read cost of sharing that connection is irrelevant. WAL and the busy timeout are belt-and-braces for when a second read connection is added later.
+
+## Scale memo: 100M events/day (~1,150/s average, much higher at peak)
+
+**What breaks first.** Not the HTTP layer. The single SQLite writer connection: every batch is a serialised transaction on one connection, so ingest throughput has a hard ceiling and one slow batch delays every other provider. Worse, `GET .../stats` runs `COUNT(DISTINCT contact_id) ... GROUP BY type` over the *raw* events on every dashboard poll, on that same connection. Cost grows with history, so the dashboard gets slower every day and starts blocking ingest. Blocked ingest means provider timeouts, and provider retries amplify load exactly when we are weakest. After that: one disk, one machine, WAL/backup growth, and no way to run two instances.
+
+**What I would change, in order.**
+1. Measure first: ingest p99, stats p99, queue/lock waits, duplicate rate. Do not guess which wall I hit first.
+2. Put a durable queue in front of the webhook; acknowledge quickly and process asynchronously (details below).
+3. Bigger multi-row inserts and config tuning buy time, but SQLite is a stopgap at this volume.
+4. Pre-aggregate. Keep raw events for audit, and maintain rollups per `(campaign, type, UTC day)`: event totals plus a unique-contact membership table keyed `(campaign, type, contact_id)`. Stats then reads a handful of rows instead of scanning history. The unique table is also the dedup source of truth for "opened".
+5. Move storage to Postgres if the team wants transactions + familiar operations, or ClickHouse if analytics/ad-hoc slicing dominates. I would start with Postgres, because counters and reconciliation want transactions, and move heavy analytical reads to ClickHouse later if needed.
+6. Partition by time (monthly) and optionally campaign; retention on raw events, keep rollups forever.
+7. Cache stats for 30–60s and label freshness with `as_of`. Marketing does not need sub-second numbers; it needs numbers it can trust.
+
+**API contract.** Mostly unchanged: same endpoints, same field names. `POST /events` may return `202` with a batch id instead of immediate counts once ingest is async (or keep 200 with "queued"). Stats should gain a time range and a per-day series, and `as_of` becomes load-bearing. Storage and internals change completely; callers mostly do not.
+
+**Queue: yes, but it is not free.** Kafka/SQS between webhook and processor absorbs spikes, survives restarts, and decouples ingest from aggregation. New problems: lag (dashboard is stale; expose it), no ordering guarantee (we already never depend on order), consumer retries and rebalances (at-least-once, so dedup must be idempotent at the consumer), poison messages (dead-letter queue + alert + replay tool), and more operational surface. Exactly-once delivery is not something I would claim; idempotent writes give the same outcome for our purposes.
+
+**New duplicate sources.** Consumer retries after a timeout or rebalance, producer retries when the ack is lost, replays/backfills of a queue or a day's file, multi-region producers writing to one store, and manual corrections. Mitigation is the same everywhere: one unique key at the final store (`event_id`), an idempotent upsert, and a dedup membership table for unique contacts. Dedup cannot live only in the webhook anymore, because the webhook is no longer the only entry point.
+
+**Keeping counters trustworthy.** Raw events stay append-only and keyed by `event_id`. Rollups are derived, never independently invented. Update rollups in the same transaction as the raw insert where possible; also run a periodic reconciliation that recomputes a trailing window (say yesterday and today) from raw events and compares it with the rollups, alerting on drift and repairing. Version the metric definition (unique vs total opens, bot filtering) and store that version with the rollup, so a definition change is explainable rather than a mystery drop.
+
+**What I would monitor.** Ingest lag (`now - event.timestamp` and `now - received_at`), queue depth and consumer lag, 5xx rate, rejection rate split by reason, duplicate rate, p99 ingest and stats latency, DB write latency and lock waits, counter drift from reconciliation, late-event rate, DLQ size, cache staleness, disk.
+
+**What I would deliberately not solve yet.** End-to-end exactly-once (idempotency is enough), multi-region active-active, sub-second real-time dashboards, per-contact timelines at this volume, and automated GDPR deletion. They are real, but none of them is the first thing that breaks.
+
+## The angry marketer: Delivered 970k → 975k, Opened 250k → 248k
+
+First: **delivered rising is not suspicious.** Late deliveries are the normal case the brief describes; 5k more deliveries in 30 minutes is exactly what a running campaign looks like. **Opened falling is the thing that needs an explanation.** Clicked stayed flat at 20k, which is a useful clue: a genuine loss of engagement data would usually move clicks too.
+
+Plausible explanations, before assuming a bug:
+- **Late delivered events** arriving in the window (expected, not a bug).
+- **Provider corrections/reclassification**: opens retracted after bot filtering, or Apple Mail Privacy Protection prefetch opens removed; some providers revise events after sending them.
+- **Dedup or a backfill/reprocessing job**: duplicate opens removed, or a job recomputed the aggregate.
+- **Definition change**: `opened` switched from total events to unique contacts, or started excluding machine opens; a deploy can change semantics without changing the API.
+- **Time window / timezone**: the view changed from "campaign to date" to "last 30 minutes", or a timezone/DST boundary moved events out of the window.
+- **Different campaign or filter**: a variant/segment filter, or the dashboard is showing a different campaign than the marketer thinks.
+- **Cache or read-replica lag**: one poll hit a stale replica or a cached response, the other hit fresh data.
+- **Deletion**: bounces, unsubscribes or a GDPR deletion removed contacts/events (unlikely to be exactly 2k, but plausible).
+- **An actual bug**: double counting was fixed (opens were inflated before), events were dropped or overwritten, or a pagination/aggregation bug undercounts.
+
+What I would check first, in this order:
+1. Query raw events for that campaign with `received_at BETWEEN 10:00 AND 10:30` (arrival time), grouped by `type`. Are opens being *deleted or changed*, and are new delivered events simply arriving?
+2. Compare the same aggregate before and after, and compare `counts` vs `total_events`: if unique opens fell but total open events did not, the definition changed; if both fell, data changed.
+3. Look at deploys, feature flags, backfill/dedup jobs and cache flushes in that window. A change with no new events is almost always one of these.
+4. Check whether the drop is concentrated (one provider, one domain, machine opens) or uniform. Concentration points to a provider correction or a filter; uniform points to a definition/deploy.
+5. Query the primary directly and bypass the cache/replica. If the number is 250k there, the pipeline is fine and the read path is stale.
+
+How I would decide bug vs expected:
+- New delivered raw events received in the window and opens unchanged in raw → **expected**; explain late delivery.
+- Raw opens still present and the same query now returns the old number → **read-path bug** (cache/replica/aggregation); fix and add a freshness indicator.
+- Raw opens deleted or mutated → **pipeline bug or deliberate job**; identify the actor from logs, restore if wrong, and add an audit trail.
+- Opens unchanged in raw but definition/version changed → **expected product change**; say so, show both numbers, and version the metric.
+- No new events, no deploy, no job, number still differs between two identical queries → **bug**, and the first thing to fix is reproducibility, not the number.
+
+## What I completed / what I intentionally skipped
+
+Completed:
+- Read the PDF/assignment and audited the seed by parsing it, not by sampling.
+- `NOTES.md` Part 1 (interpretation, assumptions, ambiguities, PM questions, priorities, storage choice).
+- The service: per-element validation, partial-batch success, atomic `event_id` dedup, durable SQLite storage, stats with unique contacts + raw totals + guarded rates, and optional cursor-paginated events.
+- Tests for the behaviours I would be most embarrassed to break, including `-race` concurrency and the full seed, plus an end-to-end curl run.
+- The debugging exercise: four minimal fixes, 20/20 deterministic runs, clean `-race`, and `BUGS.md`.
+- `README.md` with run commands and curl examples.
+
+Intentionally skipped:
+- Auth, Docker, deployment, UI (explicitly out of scope).
+- A campaign table/catalog, campaign creation, and validation of campaign ids against it.
+- Time-range/daily-series stats, which a real dashboard will want next.
+- Retention, GDPR/contact deletion, and deleting events.
+- Persisting rejected events in a dead-letter table and a replay tool (the response reports them; that is all).
+- Schema migrations/versioning, multi-instance operation, load testing at 100M/day, fuzz tests, metrics/tracing endpoints.
+
+## If I had another day
+
+1. Time-window stats (`from`/`to`, per-day series) and an explicit `definition_version` in the response.
+2. A dead-letter table for rejected events plus a replay command, so bad provider data is inspectable instead of only reported.
+3. Reconciliation job: recompute rollups from raw events and alert on drift — the precondition for trusting counters at scale.
+4. Property/fuzz tests for validation and pagination, and a load test at the projected peak.
+5. Prometheus metrics for the signals listed in the scale memo, with `as_of`/lag exposed to the dashboard.
+6. Schema migrations, a retention job, and a small campaign catalog so an empty campaign is distinguishable from a typo.

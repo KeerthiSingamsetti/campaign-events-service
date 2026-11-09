@@ -2,4 +2,5 @@
 *.db
 *.db-wal
 *.db-shm
+*.exe
 actual.txt
