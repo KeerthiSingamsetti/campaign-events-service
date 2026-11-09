@@ -1,0 +1,40 @@
+campaign=cmp_A sent=1987 delivered=1914 opened=1283 clicked=550 unique_opens=942
+  2026-08-01 delivered=270
+  2026-08-02 delivered=277
+  2026-08-03 delivered=275
+  2026-08-04 delivered=268
+  2026-08-05 delivered=280
+  2026-08-06 delivered=278
+  2026-08-07 delivered=266
+campaign=cmp_B sent=1695 delivered=1542 opened=1115 clicked=467 unique_opens=833
+  2026-08-01 delivered=221
+  2026-08-02 delivered=210
+  2026-08-03 delivered=218
+  2026-08-04 delivered=202
+  2026-08-05 delivered=210
+  2026-08-06 delivered=236
+  2026-08-07 delivered=245
+campaign=cmp_C sent=1341 delivered=1319 opened=892 clicked=383 unique_opens=710
+  2026-08-01 delivered=201
+  2026-08-02 delivered=190
+  2026-08-03 delivered=174
+  2026-08-04 delivered=176
+  2026-08-05 delivered=191
+  2026-08-06 delivered=206
+  2026-08-07 delivered=181
+campaign=cmp_D sent=981 delivered=1004 opened=604 clicked=292 unique_opens=514
+  2026-08-01 delivered=146
+  2026-08-02 delivered=127
+  2026-08-03 delivered=134
+  2026-08-04 delivered=140
+  2026-08-05 delivered=156
+  2026-08-06 delivered=148
+  2026-08-07 delivered=153
+campaign=cmp_E sent=715 delivered=688 opened=425 clicked=203 unique_opens=380
+  2026-08-01 delivered=101
+  2026-08-02 delivered=107
+  2026-08-03 delivered=88
+  2026-08-04 delivered=101
+  2026-08-05 delivered=95
+  2026-08-06 delivered=98
+  2026-08-07 delivered=98

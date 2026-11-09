@@ -1,0 +1,5 @@
+.tools/
+*.db
+*.db-wal
+*.db-shm
+actual.txt
