@@ -4,7 +4,7 @@ Being direct: this submission was built with an AI coding agent, and the design 
 
 ## Tools used
 
-- **Freebuff / Codebuff coding agent** (Claude-based) inside the editor: most of the first draft of the Go service, tests, README, NOTES and BUGS.md, plus running the commands and iterating on failures.
+- **AntiGravity and Claude-based** inside the editor: most of the first draft of the Go service, tests, README, NOTES and BUGS.md, plus running the commands and iterating on failures.
 - **`pdftotext`** to extract the text of `Engineering Assignment.pdf` (so the PDF and `ASSIGNMENT.md` could both be read in full).
 - **Node.js one-off scripts** (already on the machine) to parse `seed/events.json` and count duplicates, invalid rows, unknown types and per-campaign expected numbers. No AI was needed for the arithmetic; it was faster than eyeballing 235 rows.
 - **A local Go 1.27 toolchain** and a portable clang, installed under the gitignored `.tools/` because this machine had neither Go nor a C compiler. `-race` needs cgo, hence the clang.
